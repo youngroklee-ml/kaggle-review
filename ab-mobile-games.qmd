@@ -1,0 +1,220 @@
+---
+title: "Mobile Games A/B Testing"
+format: 
+  html: 
+    embed-resources: true
+---
+
+## 개요
+
+Kaggle 웹사이트에 올라온 A/B 테스트 데이터 분석 예를 살펴보고, 추가적인 분석을 논의하고자 한다.
+
+Kaggle 분석 포스팅
+
+- https://www.kaggle.com/code/ekrembayar/a-b-testing-step-by-step-hypothesis-testing/notebook
+- https://www.kaggle.com/code/yufengsui/datacamp-project-mobile-games-a-b-testing 
+
+
+해당 A/B 테스트는 **Cookie Cats**라는 모바일 게임에서, 사용자가 계속 게임을 진행하기 전에 어느 정도 시간을 기다리거나 혹은 인앱(in-app) 구매를 해야하는 관문(gate)이 나타나는 시점에 의한 사용자 행동을 관찰한다. 관문이 사용자에게 쉬는 시간을 제공함으로써 사용자가 보다 많이, 그리고 장기간 게임을 즐길 수 있도록 할 수 있다.
+
+관문이 레벨 30에 나타나게 하는 것(control group)과 레벨 40에 나타나게 하는 것(treatment group) 중 어느 편이 사용자 유지율(retention rate)이나 사용량(진행한 게임 라운드 수)을 늘리는 데 도움이 될 지 테스트한다. 각 사용자는 control group과 treatment group 중 한 그룹에 임의로 배정되었다.
+
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import scipy.stats as stats
+```
+
+
+## 데이터
+
+데이터 파일 *cookie_cats.csv*은 Kaggle 웹사이트에서 다운로드 받을 수 있다.
+https://www.kaggle.com/code/ekrembayar/a-b-testing-step-by-step-hypothesis-testing/input
+
+```{python}
+ab = pd.read_csv('datasets/cookie_cats.csv')
+ab.info()
+```
+
+데이터는 총 90,189개의 행과 5개의 열로 이루어져 있으며, 각 열이 지닌 정보는 다음과 같다.
+
+- `userid`: 사용자 고유 식별번호
+- `version`: 해당 사용자가 설치한 앱에서 관문이 레벨 30에 나타나도록 되었는지(`gate_30`) 레벨 40에 나타나도록 되었는지(`gate_40`)
+- `sum_gamerounds`: 앱 설치 후 첫 한 주간 진행한 전체 게임 라운드 수 (참고로, 첫 2주라고 된 자료도 있음)
+- `retention_1`: 사용자가 앱 설치 후 하루 뒤에 다시 앱을 사용했는지 여부 (T/F)
+- `retention_7`: 사용자가 앱 설치 후 7일(일주일) 뒤에 다시 앱을 사용했는지 (T/F)
+
+
+```{python}
+ab.groupby(['version']).size()
+```
+
+Control group과 treatment group의 규모는 거의 같다.
+
+
+```{python}
+ab.groupby(['retention_1', 'retention_7']).size()
+```
+
+절반 이상의 사용자가 앱 설치 하루 뒤 앱을 사용하지 않았으며(`retention_1 == False`), 대부분의 사용자는 앱 설치 7일 이후에는 앱을 사용하지 않았다(`retention_7 == False`). 일부 사용자는 하루 뒤에 사용하지 않았으나 7일 뒤에 사용한 것으로 데이터에 기록되었으며, 이에 미루어 `retention_1` 변수는 "하루 혹은 그 이후"이 아니라 "바로 다음날" 앱을 다시 사용한 사용자를 나타내는 것이라 추정된다.
+
+
+```{python}
+ab.describe()[['sum_gamerounds']]
+(ab.sum_gamerounds < 30).sum() / ab.shape[0]
+```
+
+일주일간 즐긴 게임 라운드의 중위(median)은 16 라운드이며, 60% 이상의 사용자가 30라운드 미만의 게임을 플레이했다. 
+
+
+## 변수 변환
+
+게임 라운드의 경우 right skewed된 분포를 지니므로, 이를 보다 정규분포와 가깝게 만들기 위해 로그 변환을 수행하자
+
+```{python}
+ab['log_sum_gamerounds'] = np.log(ab['sum_gamerounds'] + 1)
+ab.hist('log_sum_gamerounds')
+```
+
+
+## 데이터 서브셋
+
+물론, 사용자가 실제 테스트에 의한 경험 차이에 노출되었는가(즉, 레벨 30에 도달하였는가)와는 별개로, 테스트에 노출시키고자 한 의도(intention), 즉 Control/Treatment 그룹 할당에 기반하여 전체 데이터를 이용하여 A/B 테스트 결과를 분석하는 것도 적합한 분석 방법일 것이다. 하지만, 관문이 나타나는 시점이 사용자 행동에 영향을 미친다면, 레벨 30 미만에 도달한 사용자는 그룹 간에 차이가 없고, 레벨 30에 도달한 사용자만을 추려 분석했을 때 그 차이가 전체 평균에 비해 크게 나타날 것이라 기대하는 것이 합리적이라고 본다.
+
+레벨과 게임 라운드 숫자의 관계가 데이터 설명에서 나타나지 않은 부분이 아쉽다. 본 분석에서는 플레이한 게임 라운드가 30 미만일 때와 30 이상일 때로 나누어 A/B 테스트 결과를 비교해보고자 한다. 이는 플레이한 게임 라운드가 30 미만일 때는 레벨 30에 도달하지 않는다는, 검증되지 않은 가정에 기반한 것이다. 
+
+```{python}
+ab['type'] = ['light' if x < 30  else 'heavy' for x in ab['sum_gamerounds']]
+ab.groupby(['version', 'type']).size()
+
+ab_light = ab[ab.type == 'light']
+ab_heavy = ab[ab.type == 'heavy']
+```
+
+```{python}
+ab_light.hist('log_sum_gamerounds')
+ab_heavy.hist('log_sum_gamerounds')
+```
+
+
+## 게임 수
+
+### Light users
+
+우선, 게임 라운드가 적은 사용자에 대해 그룹 간 비교를 해보자. 이 사용자에 대해서는 A/B 테스트 결과 차이가 없을 것이라 기대해본다.
+
+```{python}
+sns.boxplot(x = ab_light.version, y = ab_light.log_sum_gamerounds)
+```
+
+t-test를 수행해보자.
+
+```{python}
+groupA = ab_light[ab_light['version'] == "gate_30"]['log_sum_gamerounds']
+groupB = ab_light[ab_light['version'] == "gate_40"]['log_sum_gamerounds']
+
+stats.ttest_ind(groupA, groupB)
+```
+
+p-value가 상당히 작게 (0.077) 나타나, 다소 애매한 결과가 얻어졌다. 다만, 유의수준 0.05에서는 유의하지 않게 나타났다.
+
+
+### Heavy users
+
+다음으로, 게임 라운드가 30 이상인 사용자를 그룹 간 비교해보자. 이 사용자에 대해서는 A/B 테스트 결과 차이가 있을 것이라 기대해본다.
+
+```{python}
+sns.boxplot(x = ab_heavy.version, y = ab_heavy.log_sum_gamerounds)
+```
+
+t-test를 수행해보자.
+
+```{python}
+groupA = ab_heavy[ab_heavy['version'] == "gate_30"]['log_sum_gamerounds']
+groupB = ab_heavy[ab_heavy['version'] == "gate_40"]['log_sum_gamerounds']
+
+stats.ttest_ind(groupA, groupB)
+```
+
+테스트의 p-value가 매우 작게 (< 0.01) 나타나, 높은 신뢰도로 두 그룹 간 차이가 있을 것이라는 결과를 얻었다.
+
+그룹간의 차이를 살펴보자.
+
+```{python}
+ab_heavy.groupby(['version'])['log_sum_gamerounds'].mean()
+```
+
+Treatment group `"gate_40"`일 때 control group `"gate_30"`보다 평균 게임 라운드 수가 더 높은 것으로 보였다.
+
+전체 관측값에서 `"log_sum_gamerounds"`값이 지나치게 높은 하나의 개체를 제외하고 다시 분석해보자.
+
+```{python}
+ab_heavy_remove_one = ab_heavy[ab_heavy['log_sum_gamerounds'] < max(ab_heavy['log_sum_gamerounds'])]
+sns.boxplot(x = ab_heavy_remove_one.version, y = ab_heavy_remove_one.log_sum_gamerounds)
+```
+
+```{python}
+groupA = ab_heavy_remove_one[ab_heavy_remove_one['version'] == "gate_30"]['log_sum_gamerounds']
+groupB = ab_heavy_remove_one[ab_heavy_remove_one['version'] == "gate_40"]['log_sum_gamerounds']
+
+stats.ttest_ind(groupA, groupB)
+```
+
+```{python}
+ab_heavy_remove_one.groupby(['version'])['log_sum_gamerounds'].mean()
+```
+
+결과는 큰 차이 없이, 여전히 treatment group에서 평균 게임 라운드 수가 더 높은 것으로 나타났다.
+
+
+## 7일 후 접속
+
+7일 retention 비율을 그룹간 비교해보자. https://www.kaggle.com/code/yufengsui/datacamp-project-mobile-games-a-b-testing 에 있는 부트스트랩 코드를 수행해보자.
+
+### Light user
+
+```{python}
+boot_7d = []
+for i in range(500):
+    boot_mean = ab_light.sample(frac=1, replace=True).groupby('version')['retention_7'].mean()
+    boot_7d.append(boot_mean)
+
+boot_7d = pd.DataFrame(boot_7d)
+
+boot_7d['diff'] = (boot_7d.gate_30 - boot_7d.gate_40) / boot_7d.gate_40 * 100
+
+# Ploting the bootstrap % difference
+ax = boot_7d['diff'].plot(kind='density')
+ax.set_title('% difference in 7-day retention between the two AB-groups: Light users')
+
+# Calculating the probability that 7-day retention is greater when the gate is at level 30
+print('Probability that 7-day retention is greater when the gate is at level 30:',(boot_7d['diff'] > 0).mean())
+```
+
+30라운드를 미처 플레이하지 않은 사용자 집단에서, control group의 7일 후 접속 비율이 높았다. 만약 플레이한 게임 라운드가 30 미만일 때는 레벨 30에 도달하지 않는다는 가정이 성립한다면, 이러한 차이는 선뜻 이해되지 않는 부분이다. 
+
+### Heavy user
+
+```{python}
+boot_7d = []
+for i in range(500):
+    boot_mean = ab_heavy.sample(frac=1, replace=True).groupby('version')['retention_7'].mean()
+    boot_7d.append(boot_mean)
+
+boot_7d = pd.DataFrame(boot_7d)
+
+boot_7d['diff'] = (boot_7d.gate_30 - boot_7d.gate_40) / boot_7d.gate_40 * 100
+
+# Ploting the bootstrap % difference
+ax = boot_7d['diff'].plot(kind='density')
+ax.set_title('% difference in 7-day retention between the two AB-groups: Heavy users')
+
+# Calculating the probability that 7-day retention is greater when the gate is at level 30
+print('Probability that 7-day retention is greater when the gate is at level 30:',(boot_7d['diff'] > 0).mean())
+```
+
+30라운드 이상 플레이한 사용자 집단에서도 control group의 7일 후 접속 비율이 높았다.
+
